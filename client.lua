@@ -1,5 +1,4 @@
--- client.lua (使用 lib.registerMenu，完全支援 function callback)
-
+-- client.lua
 local currentVehicle = nil
 
 -- ══════════════════════════════════════════════════════════════
@@ -55,7 +54,35 @@ local function getVeh()
 end
 
 -- ══════════════════════════════════════════════════════════════
---  改裝選單
+--  動態讀取 mod 部位名稱
+--  直接從遊戲 label 讀，確保和實際改裝部位一致
+-- ══════════════════════════════════════════════════════════════
+
+-- 每個 modIndex 的英文備用名（遊戲 label 讀不到時用）
+local MOD_FALLBACK = {
+    [0]='前保險桿',[1]='後保險桿',[2]='側裙',[3]='排氣管',
+    [4]='車架',[5]='格柵',[6]='引擎蓋',[7]='左翼子板',
+    [8]='右翼子板',[9]='後擾流板',[10]='車頂',[11]='引擎',
+    [12]='煞車',[13]='變速箱',[14]='喇叭',[15]='懸吊',
+    [16]='裝甲',[17]='車窗',[18]='渦輪增壓',[22]='車燈',
+    [23]='後視鏡',[24]='輪圈',[25]='後輪圈',[27]='輪胎',
+    [48]='引擎聲音',
+}
+
+local function getModSlotName(veh, modIndex)
+    -- GetModTextLabel 回傳這個 slot 對應的 label key
+    local key = GetModTextLabel(veh, modIndex)
+    if key and key ~= '' and key ~= 'NULL' then
+        local text = GetLabelText(key)
+        if text and text ~= '' and text ~= 'NULL' then
+            return text
+        end
+    end
+    return MOD_FALLBACK[modIndex] or ('Mod ' .. modIndex)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  外觀改裝選單（動態掃描，名稱直接從遊戲讀）
 -- ══════════════════════════════════════════════════════════════
 
 local function openTuningMenu()
@@ -65,42 +92,37 @@ local function openTuningMenu()
     end
     SetVehicleModKit(veh, 0)
 
-    local tuningMods = {
-        { label = '前保險桿', modIndex = 0  },
-        { label = '後保險桿', modIndex = 1  },
-        { label = '側裙',     modIndex = 2  },
-        { label = '排氣管',   modIndex = 3  },
-        { label = '車架',     modIndex = 4  },
-        { label = '格柵',     modIndex = 5  },
-        { label = '引擎蓋',   modIndex = 6  },
-        { label = '左翼子板', modIndex = 7  },
-        { label = '右翼子板', modIndex = 8  },
-        { label = '後擾流板', modIndex = 9  },
-        { label = '車頂',     modIndex = 10 },
-        { label = '車窗',     modIndex = 17 },
-        { label = '車燈',     modIndex = 22 },
-        { label = '後視鏡',   modIndex = 23 },
-    }
+    -- 跳過性能/toggle 槽，只掃外觀槽 0~23
+    local skipSlots = { [11]=true,[12]=true,[13]=true,[15]=true,[18]=true }
 
-    local options = {}
-    local indexMap = {}   -- options 的位置 → modIndex
+    local options  = {}
+    local slotList = {}  -- 對應 options 順序的 modIndex
 
-    for _, mod in ipairs(tuningMods) do
-        local count = GetNumVehicleMods(veh, mod.modIndex)
-        if count > 0 then
-            local current = GetVehicleMod(veh, mod.modIndex)
-            local values = {}
-            for i = -1, count - 1 do
-                values[#values + 1] = i == -1 and '無' or ('套件 ' .. (i + 1))
+    for modIndex = 0, 23 do
+        if not skipSlots[modIndex] then
+            local count = GetNumVehicleMods(veh, modIndex)
+            if count > 0 then
+                local slotName = getModSlotName(veh, modIndex)
+                local current  = GetVehicleMod(veh, modIndex)
+
+                local values = { '無' }
+                for i = 0, count - 1 do
+                    values[#values + 1] = '套件 ' .. (i + 1)
+                end
+
+                options[#options + 1] = {
+                    label        = slotName,
+                    description  = ('共 %d 個套件 | 目前: %s'):format(
+                        count,
+                        current >= 0 and ('套件 ' .. (current + 1)) or '無'
+                    ),
+                    values       = values,
+                    defaultIndex = current + 2,  -- -1→idx1, 0→idx2, 1→idx3...
+                    close        = false,
+                }
+                slotList[#slotList] = modIndex  -- 注意：這裡用 #slotList 已是 #options-1，修正如下
+                slotList[#options]  = modIndex
             end
-            options[#options + 1] = {
-                label        = mod.label,
-                description  = ('共 %d 個套件'):format(count),
-                values       = values,
-                defaultIndex = current + 2,  -- -1 → index 1, 0 → index 2 ...
-                close        = false,
-            }
-            indexMap[#options] = { modIndex = mod.modIndex, offset = -1 }
         end
     end
 
@@ -113,16 +135,20 @@ local function openTuningMenu()
         title    = '🎨 外觀改裝',
         position = 'top-left',
         options  = options,
-    }, function(selected, scrollIndex, args)
-        local info = indexMap[selected]
-        if not info then return end
-        local modValue = scrollIndex - 2 + info.offset + 1
-        -- scrollIndex 1 = '無'(-1), 2 = 套件0, 3 = 套件1 ...
-        local realValue = scrollIndex - 2  -- -1=無, 0=套件1...
-        SetVehicleMod(veh, info.modIndex, realValue, false)
+    }, function(selected, scrollIndex)
+        local modIndex = slotList[selected]
+        if not modIndex then return end
+        -- scrollIndex 1 = '無' → SetVehicleMod(..., -1)
+        -- scrollIndex 2 = '套件1' → SetVehicleMod(..., 0)
+        local realValue = scrollIndex - 2
+        SetVehicleMod(veh, modIndex, realValue, false)
     end)
     lib.showMenu('vmenu_tuning')
 end
+
+-- ══════════════════════════════════════════════════════════════
+--  性能改裝選單
+-- ══════════════════════════════════════════════════════════════
 
 local function openPerformanceMenu()
     local veh = getVeh()
@@ -131,14 +157,12 @@ local function openPerformanceMenu()
     end
     SetVehicleModKit(veh, 0)
 
-    -- Level mods
     local levelMods = {
-        { label = '引擎',   modIndex = 11 },
-        { label = '變速箱', modIndex = 13 },
-        { label = '煞車',   modIndex = 12 },
-        { label = '懸吊',   modIndex = 15 },
+        { label = '引擎',     modIndex = 11 },
+        { label = '變速箱',   modIndex = 13 },
+        { label = '煞車',     modIndex = 12 },
+        { label = '懸吊',     modIndex = 15 },
     }
-    -- Toggle mods
     local toggleMods = {
         { label = '渦輪增壓', modIndex = 18 },
         { label = '氮氣加速', modIndex = 63 },
@@ -152,10 +176,14 @@ local function openPerformanceMenu()
         local count = GetNumVehicleMods(veh, mod.modIndex)
         if count > 0 then
             local current = GetVehicleMod(veh, mod.modIndex)
-            local values = { '無' }
+            local values  = { '無' }
             for i = 0, count - 1 do values[#values + 1] = '等級 ' .. (i + 1) end
             options[#options + 1] = {
                 label        = mod.label,
+                description  = ('共 %d 等級 | 目前: %s'):format(
+                    count,
+                    current >= 0 and ('等級 ' .. (current + 1)) or '無'
+                ),
                 values       = values,
                 defaultIndex = current + 2,
                 close        = false,
@@ -168,6 +196,7 @@ local function openPerformanceMenu()
         local isOn = IsToggleModOn(veh, mod.modIndex)
         options[#options + 1] = {
             label        = mod.label,
+            description  = isOn and '目前：開啟' or '目前：關閉',
             values       = { '關閉', '開啟' },
             defaultIndex = isOn and 2 or 1,
             close        = false,
@@ -184,19 +213,22 @@ local function openPerformanceMenu()
         title    = '⚙️ 性能改裝',
         position = 'top-left',
         options  = options,
-    }, function(selected, scrollIndex, args)
+    }, function(selected, scrollIndex)
         local info = modInfos[selected]
         if not info then return end
         SetVehicleModKit(veh, 0)
         if info.kind == 'level' then
-            local realValue = scrollIndex - 2  -- 1='無'→-1, 2='等級1'→0
-            SetVehicleMod(veh, info.modIndex, realValue, false)
+            SetVehicleMod(veh, info.modIndex, scrollIndex - 2, false)
         elseif info.kind == 'toggle' then
             ToggleVehicleMod(veh, info.modIndex, scrollIndex == 2)
         end
     end)
     lib.showMenu('vmenu_performance')
 end
+
+-- ══════════════════════════════════════════════════════════════
+--  改裝主選單
+-- ══════════════════════════════════════════════════════════════
 
 local function openModMenu()
     local veh = getVeh()
@@ -209,7 +241,7 @@ local function openModMenu()
         position = 'top-left',
         options  = {
             { label = '⚙️ 性能改裝', description = '引擎 / 煞車 / 懸吊 / 渦輪 / 氮氣 / 防彈輪胎' },
-            { label = '🎨 外觀改裝', description = '保險桿 / 側裙 / 擾流板 / 引擎蓋 ...' },
+            { label = '🎨 外觀改裝', description = '自動掃描此車所有可用套件部位' },
         },
     }, function(selected)
         if selected == 1 then openPerformanceMenu()
@@ -223,7 +255,7 @@ end
 --  車輛生成選單
 -- ══════════════════════════════════════════════════════════════
 
-local function openVehicleList(title, vehicleList, backId)
+local function openVehicleList(title, vehicleList)
     local options = {}
     for _, v in ipairs(vehicleList) do
         options[#options + 1] = { label = v.label, description = v.model }
@@ -253,10 +285,10 @@ local function openCategoryMenu()
         options  = options,
     }, function(selected)
         if selected == 1 then
-            openVehicleList('⭐ Addon 模組車', Config.AddonVehicles, 'vmenu_category')
+            openVehicleList('⭐ Addon 模組車', Config.AddonVehicles)
         else
             local cat = Config.NativeVehicles[selected - 1]
-            openVehicleList(cat.label, cat.vehicles, 'vmenu_category')
+            openVehicleList(cat.label, cat.vehicles)
         end
     end)
     lib.showMenu('vmenu_category')
@@ -272,19 +304,17 @@ local function openMainMenu()
         title    = '🚘 車輛選單',
         position = 'top-left',
         options  = {
-            { label = '🚗 生成車輛',      description = '依分類瀏覽並生成車輛'         },
-            { label = '🔧 改裝車輛',      description = '性能 & 外觀改裝（需坐在車上）' },
-            { label = '🩹 修車',          description = '修復車輛至全滿（需坐在車上）'  },
-            { label = '🚿 洗車',          description = '清潔車輛外觀（需坐在車上）'    },
-            { label = '🗑️ 刪除當前車輛', description = '移除你生成的車輛'              },
+            { label = '🚗 生成車輛',      description = '依分類瀏覽並生成車輛'          },
+            { label = '🔧 改裝車輛',      description = '性能 & 外觀改裝（需坐在車上）'  },
+            { label = '🩹 修車',          description = '修復車輛至全滿（需坐在車上）'   },
+            { label = '🚿 洗車',          description = '清潔車輛外觀（需坐在車上）'     },
+            { label = '🗑️ 刪除當前車輛', description = '移除你生成的車輛'               },
         },
     }, function(selected)
         if selected == 1 then
             openCategoryMenu()
-
         elseif selected == 2 then
             openModMenu()
-
         elseif selected == 3 then
             local veh = getVeh()
             if not veh then lib.notify({ title = '修車', description = '需坐在車上', type = 'error' }) return end
@@ -293,13 +323,11 @@ local function openMainMenu()
             SetVehicleEngineHealth(veh, 1000.0)
             SetVehicleBodyHealth(veh, 1000.0)
             lib.notify({ title = '修車', description = '車輛已修復 🩹', type = 'success', duration = 3000 })
-
         elseif selected == 4 then
             local veh = getVeh()
             if not veh then lib.notify({ title = '洗車', description = '需坐在車上', type = 'error' }) return end
             SetVehicleDirtLevel(veh, 0.0)
             lib.notify({ title = '洗車', description = '車輛已洗乾淨 🚿', type = 'success', duration = 3000 })
-
         elseif selected == 5 then
             deleteCurrentVehicle()
             lib.notify({ title = '車輛', description = '車輛已刪除', type = 'inform', duration = 2000 })
